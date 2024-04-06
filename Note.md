@@ -779,3 +779,360 @@ $ flask shell
 
 # 第五章 用户登入
 
+## 哈希密码
+
+**Werkzeug** 密码哈希的软件包之一，在flask安装时就会安装
+
+```python
+>>> from werkzeug.security import generate_password_hash
+>>> hash = generate_password_hash('foobar')
+>>> hash
+'scrypt:32768:8:1$DdbIPADqKg2nniws$4ab051ebb6767a...'
+```
+
+验证密码
+
+```python
+>>> from werkzeug.security import check_password_hash
+>>> check_password_hash(hash, 'foobar')
+True
+>>> check_password_hash(hash, 'barfoo')
+False
+```
+
+向`app/models.py`加入两个函数实现密码逻辑
+
+```python
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# ...
+
+class User(db.Model):
+    # ...
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+```
+
+## Flask登入
+
+安装**flask-login**扩展
+
+```bash
+$ pip install flask-login
+```
+
+同样需要在`app/__init__.py`中初始化
+
+```py
+# ...
+from flask_login import LoginManager
+
+app = Flask(__name__)
+# ...
+login = LoginManager(app)
+
+# ...
+```
+
+## 用户模型
+
+修改`app/models.py`
+
+```python
+# ...
+from flask_login import UserMixin
+
+class User(UserMixin, db.Model):
+    # ...
+```
+
+## 用户加载函数
+
+flask-login通过唯一标识来追踪用户，每次用户到新界面时都会检索用户的id，需要配置一个用户加载函数加载给定id的用户
+
+在`app/models.py`中
+
+```python
+from app import login
+# ...
+
+@login.user_loader
+def load_user(id):
+    return db.session.get(User, int(id))
+```
+
+## 实现用户登入功能
+
+修改`app/routes.py`实现登入
+
+```python
+# ...
+from flask_login import current_user, login_user
+import sqlalchemy as sa
+from app import db
+from app.models import User
+
+# ...
+
+# 定义一个路由，当访问/login时，执行下面的login函数
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    # 如果当前用户已经认证，则重定向到index页面
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    # 实例化一个LoginForm对象
+    form = LoginForm()
+    # 如果表单提交成功，则执行下面的代码
+    if form.validate_on_submit():
+        # 从数据库中查找用户名等于form.username.data的用户
+        user = db.session.scalar(
+            sa.select(User).where(User.username == form.username.data))
+        # 如果找不到用户，或者用户名不匹配，则提示错误信息，并重定向到login页面
+        if user is None or not user.check_password(form.password.data):
+            flash('Invalid username or password')
+            return redirect(url_for('login'))
+        # 登录用户
+        login_user(user, remember=form.remember_me.data)
+        # 重定向到index页面
+        return redirect(url_for('index'))
+    # 否则，渲染login.html页面，并将form对象传递给页面
+    return render_template('login.html', title='Sign In', form=form)
+```
+
+## 注销用户
+
+添加`app/routes.py`实现注销
+
+```python
+# ...
+from flask_login import logout_user
+
+# ...
+
+@app.route('/logout')
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
+```
+
+在模板文件`app/templates/base.html`中添加注销按钮
+
+```html
+        <div>
+            Microblog:
+            <a href="{{ url_for('index') }}">Home</a>
+            {% if current_user.is_anonymous %}
+            <a href="{{ url_for('login') }}">Login</a>
+            {% else %}
+            <a href="{{ url_for('logout') }}">Logout</a>
+            {% endif %}
+        </div>
+```
+
+## 引导用户登入
+
+类似路由重定向，只有用户登入才能查看程序的某些界面，没登入的用户重定向到
+
+为了实现这个功能，Flask-Login 需要知道处理登录的视图函数是什么。这可以添加到`app/__init__.py`中：
+
+```python
+# ...
+login = LoginManager(app)
+# 登入界面
+login.login_view = 'login'
+```
+
+对于需要保护的界面使用**login_required**装饰器即可，在`app/routes.py`中修改
+
+```python
+from flask_login import login_required
+
+@app.route('/')
+@app.route('/index')
+@login_required
+def index():
+    # ...
+```
+
+用户重定向到登入页面时会在url中加入参数，比如http://127.0.0.1:5000/login?next=%2F，确保当用户登入后需要重定向到上一个界面
+
+修改`app/routes.py`读取**next**参数，实现重定向到原界面功能
+
+```py
+# 定义一个路由，当访问/login时，执行下面的login函数
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    # 如果当前用户已经认证，则重定向到index页面
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    # 实例化一个LoginForm对象
+    form = LoginForm()
+    # 如果表单提交成功，则执行下面的代码
+    if form.validate_on_submit():
+        user = db.session.scalar(
+            sa.select(User).where(User.username == form.username.data)
+        )
+        # 如果用户不存在或密码不正确，则显示错误提示
+        if user is None or not user.check_password(form.password.data):
+            flash("Invalid username or password")
+            return redirect(url_for("login"))
+        # 否则，登录用户
+        login_user(user, remember=form.remember_me.data)
+        # 获取next参数，如果存在，且参数合法，则跳转到next参数指定的页面，否则跳转到index页面
+        next_page = request.args.get("next")
+        if not next_page or urlsplit(next_page).netloc != "":
+            next_page = url_for("index")
+        return redirect(next_page)
+    # 否则，渲染login.html页面，并将form对象传递给页面
+    return render_template("login.html", title="Sign In", form=form)
+```
+
+## 显示用户登入
+
+`app/templates/index.html`中渲染真实登入的用户
+
+```html
+{% extends "base.html" %}
+
+{% block content %}
+    <h1>Hi, {{ current_user.username }}!</h1>
+{% endblock %}
+```
+
+`app/routes.py`不再传递模板
+
+```python
+@app.route('/')
+@app.route('/index')
+@login_required
+def index():
+    # ...
+    return render_template("index.html", title='Home Page')
+```
+
+然后注册一个用户
+
+```python
+>>> u = User(username='susan', email='susan@example.com')
+>>> u.set_password('cat')
+>>> db.session.add(u)
+>>> db.session.commit()
+```
+
+这样就能实现用户登入了
+
+## 用户注册
+
+在`app/routes.py`添加
+
+```py
+class RegistrationForm(FlaskForm):
+    #   定义一个注册表单类，继承自FlaskForm
+    username = StringField("Username", validators=[DataRequired()])
+    #   定义一个用户名字段，并添加数据必需的验证器
+    email = StringField("Email", validators=[DataRequired(), Email()])
+    #   定义一个邮箱字段，并添加数据必需的验证器和电子邮件的验证器
+    password = PasswordField("Password", validators=[DataRequired()])
+    #   定义一个密码字段，并添加数据必需的验证器
+    password2 = PasswordField(
+        #   定义一个重复密码字段，并添加数据必需的验证器和EqualTo验证器，用于验证密码和重复密码是否一致
+        "Repeat Password",
+        validators=[DataRequired(), EqualTo("password")],
+    )
+    submit = SubmitField("Register")
+    #   定义一个提交字段
+
+    def validate_username(self, username):
+        #   定义一个验证用户名的函数，用于检查数据库中是否存在同名的用户
+        user = db.session.scalar(sa.select(User).where(User.username == username.data))
+        if user is not None:
+            #   如果存在同名用户，则抛出异常
+            raise ValidationError("Please use a different username.")
+
+    def validate_email(self, email):
+        #   定义一个验证邮箱的函数，用于检查数据库中是否存在同名的用户
+        user = db.session.scalar(sa.select(User).where(User.email == email.data))
+        if user is not None:
+            #   如果存在同名用户，则抛出异常
+            raise ValidationError("Please use a different email address.")
+```
+
+WTForms 的验证器**Email()**需要安装外部依赖项：
+
+```
+(venv) $ pip install email-validator
+```
+
+然后添加`app/templates/register.html`注册模板
+
+```html
+{% extends "base.html" %} {% block content %}
+<h1>Register</h1>
+<form action="" method="post">
+  {{ form.hidden_tag() }}
+  <p>
+    {{ form.username.label }}<br />
+    {{ form.username(size=32) }}<br />
+    {% for error in form.username.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>
+    {{ form.email.label }}<br />
+    {{ form.email(size=64) }}<br />
+    {% for error in form.email.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>
+    {{ form.password.label }}<br />
+    {{ form.password(size=32) }}<br />
+    {% for error in form.password.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>
+    {{ form.password2.label }}<br />
+    {{ form.password2(size=32) }}<br />
+    {% for error in form.password2.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>{{ form.submit() }}</p>
+</form>
+{% endblock %}
+
+```
+
+然后在`app/templates/login.html `中添加注册链接
+
+```html
+<p>New User? <a href="{{ url_for('register') }}">Click to Register!</a></p>
+```
+
+在`app/routes.py`添加注册页面路由
+
+```python
+from app import db
+from app.forms import RegistrationForm
+
+# ...
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    form = RegistrationForm()
+    if form.validate_on_submit():
+        user = User(username=form.username.data, email=form.email.data)
+        user.set_password(form.password.data)
+        db.session.add(user)
+        db.session.commit()
+        flash('Congratulations, you are now a registered user!')
+        return redirect(url_for('login'))
+    return render_template('register.html', title='Register', form=form)
+```
