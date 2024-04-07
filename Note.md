@@ -1136,3 +1136,262 @@ def register():
         return redirect(url_for('login'))
     return render_template('register.html', title='Register', form=form)
 ```
+
+# 第六章 个人主页
+
+## 个人主页和头像
+
+首先`app/routes.py`添加
+
+```python
+# 引入app、login_required和db模块
+@app.route("/user/<username>")
+@login_required
+def user(username):
+    # 查询数据库中用户名等于username的用户，没有的话发送404异常
+    user = db.first_or_404(sa.select(User).where(User.username == username))
+    # 定义一个posts列表，里面包含两个字典，分别表示用户和文章内容
+    posts = [
+        {"author": user, "body": "Test post #1"},
+        {"author": user, "body": "Test post #2"},
+    ]
+    # 渲染用户页面，传入用户和文章内容
+    return render_template("user.html", user=user, posts=posts)
+```
+
+然后添加模板`app/templates/user.html`
+
+```html
+{% extends "base.html" %}
+
+{% block content %}
+    <h1>User: {{ user.username }}</h1>
+    <hr>
+    {% for post in posts %}
+    <p>
+    {{ post.author.username }} says: <b>{{ post.body }}</b>
+    </p>
+    {% endfor %}
+{% endblock %}
+```
+
+修改导航栏，添加主页链接`app/templates/base.html`
+
+```html
+        <div>
+            Microblog:
+            <a href="{{ url_for('index') }}">Home</a>
+            {% if current_user.is_anonymous %}
+            <a href="{{ url_for('login') }}">Login</a>
+            {% else %}
+            <a href="{{ url_for('user', username=current_user.username) }}">Profile</a>
+            <a href="{{ url_for('logout') }}">Logout</a>
+            {% endif %}
+        </div>
+```
+
+## 头像
+
+使用[Gravatar](http://gravatar.com/)服务存储头像
+
+在`app/models.py`添加
+
+```python
+from hashlib import md5
+# ...
+
+class User(UserMixin, db.Model):
+    # ...
+    def avatar(self, size):
+        digest = md5(self.email.lower().encode('utf-8')).hexdigest()
+        return f'https://www.gravatar.com/avatar/{digest}?d=identicon&s={size}'
+```
+
+修改`app/templates/base.html`
+
+```html
+{% extends "base.html" %}
+
+{% block content %}
+    <table>
+        <tr valign="top">
+            <td><img src="{{ user.avatar(128) }}"></td>
+            <td><h1>User: {{ user.username }}</h1></td>
+        </tr>
+    </table>
+    <hr>
+    {% for post in posts %}
+    <table>
+        <tr valign="top">
+            <td><img src="{{ post.author.avatar(36) }}"></td>
+            <td>{{ post.author.username }} says:<br>{{ post.body }}</td>
+        </tr>
+    </table>
+    {% endfor %}
+{% endblock %}
+```
+
+这样每个帖子都有个人头像了
+
+## Jinja子模板
+
+创建呈现用户一篇文章的子模板前缀**_**是一个命名约定，可以帮助我识别哪些模板文件是子模板。
+
+`app/templates/_post.html`
+
+```html
+<table>
+  <tr valign="top">
+    <td><img src="{{ post.author.avatar(36) }}" /></td>
+    <td>{{ post.author.username }} says:<br />{{ post.body }}</td>
+  </tr>
+</table>
+```
+
+要从`app/templates/user.html`模板调用此子模板，我使用 Jinja 的**include**语句：
+
+```html
+{% extends "base.html" %}
+
+{% block content %}
+    <table>
+        <tr valign="top">
+            <td><img src="{{ user.avatar(128) }}"></td>
+            <td><h1>User: {{ user.username }}</h1></td>
+        </tr>
+    </table>
+    <hr>
+    {% for post in posts %}
+        {% include '_post.html' %}
+    {% endfor %}
+{% endblock %}
+```
+
+## 更多个人资料
+
+首先扩充下数据库中的字段信息`app/model.py`
+
+```python
+class User(UserMixin, db.Model):
+    # ...
+    about_me: so.Mapped[Optional[str]] = so.mapped_column(sa.String(140))
+    last_seen: so.Mapped[Optional[datetime]] = so.mapped_column(
+        default=lambda: datetime.now(timezone.utc))
+```
+
+然后更新数据库
+
+```bash
+$ flask db migrate -m "new fields in user model"
+$ flask db upgrade
+```
+
+然后添加这两个渲染`app/templates/user.html`
+
+```html
+{% extends "base.html" %}
+
+{% block content %}
+    <table>
+        <tr valign="top">
+            <td><img src="{{ user.avatar(128) }}"></td>
+            <td>
+                <h1>User: {{ user.username }}</h1>
+                {% if user.about_me %}<p>{{ user.about_me }}</p>{% endif %}
+                {% if user.last_seen %}<p>Last seen on: {{ user.last_seen }}</p>{% endif %}
+            </td>
+        </tr>
+    </table>
+    ...
+{% endblock %}
+```
+
+然后通过路由记录下用户最后一次登入时间`app/routes.py`
+
+```py
+# 定义一个函数，在每次请求处理之前被调用
+@app.before_request
+def before_request():
+    # 如果当前用户已经认证通过
+    if current_user.is_authenticated:
+        # 更新当前用户的最后登录时间
+        current_user.last_seen = datetime.now(timezone.utc)
+        # 提交更改
+        db.session.commit()
+```
+
+## 个人资料编辑
+
+需要创建表单收集用户的资料信息
+
+```python
+from wtforms import TextAreaField
+from wtforms.validators import Length
+
+# ...
+
+class EditProfileForm(FlaskForm):
+    username = StringField('Username', validators=[DataRequired()])
+    about_me = TextAreaField('About me', validators=[Length(min=0, max=140)])
+    submit = SubmitField('Submit')
+```
+
+配置相对应页面`app/templates/edit_profile.html`
+
+```html
+{% extends "base.html" %} {% block content %}
+<h1>Edit Profile</h1>
+<form action="" method="post">
+  {{ form.hidden_tag() }}
+  <p>
+    {{ form.username.label }}<br />
+    {{ form.username(size=32) }}<br />
+    {% for error in form.username.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>
+    {{ form.about_me.label }}<br />
+    {{ form.about_me(cols=50, rows=4) }}<br />
+    {% for error in form.about_me.errors %}
+    <span style="color: red">[{{ error }}]</span>
+    {% endfor %}
+  </p>
+  <p>{{ form.submit() }}</p>
+</form>
+{% endblock %}
+```
+
+注册路由`app/routes.py`
+
+```python
+from app.forms import EditProfileForm
+
+@app.route('/edit_profile', methods=['GET', 'POST'])
+@login_required
+def edit_profile():
+    form = EditProfileForm()
+    if form.validate_on_submit():
+        current_user.username = form.username.data
+        current_user.about_me = form.about_me.data
+        db.session.commit()
+        flash('Your changes have been saved.')
+        return redirect(url_for('edit_profile'))
+    elif request.method == 'GET':
+        form.username.data = current_user.username
+        form.about_me.data = current_user.about_me
+    return render_template('edit_profile.html', title='Edit Profile',
+                           form=form)
+```
+
+添加链接`app/templates/user.py`
+
+```html
+ {% if user.about_me %}
+      <p>{{ user.about_me }}</p>
+      {% endif %} {% if user.last_seen %}
+      <p>Last seen on: {{ user.last_seen }}</p>
+      {% endif %}
+```
+
+# 第七章

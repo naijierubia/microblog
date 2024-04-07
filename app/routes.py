@@ -3,10 +3,11 @@ from app import db
 
 import sqlalchemy as sa
 from flask import render_template, flash, redirect, url_for, request
-from app.forms import LoginForm, RegistrationForm
+from app.forms import LoginForm, RegistrationForm, EditProfileForm
 from flask_login import current_user, login_user, logout_user, login_required
 from app.models import User
 from urllib.parse import urlsplit
+from datetime import datetime, timezone
 
 
 @app.route("/")
@@ -63,3 +64,45 @@ def register():
         flash("Congratulations, you are now a registered user!")
         return redirect(url_for("login"))
     return render_template("register.html", title="Register", form=form)
+
+
+# 引入app、login_required和db模块
+@app.route("/user/<username>")
+@login_required
+def user(username):
+    # 查询数据库中用户名等于username的用户
+    user = db.first_or_404(sa.select(User).where(User.username == username))
+    # 定义一个posts列表，里面包含两个字典，分别表示用户和文章内容
+    posts = [
+        {"author": user, "body": "Test post #1"},
+        {"author": user, "body": "Test post #2"},
+    ]
+    # 渲染用户页面，传入用户和文章内容
+    return render_template("user.html", user=user, posts=posts)
+
+
+# 定义一个函数，在每次请求处理之前被调用
+@app.before_request
+def before_request():
+    # 如果当前用户已经认证通过
+    if current_user.is_authenticated:
+        # 更新当前用户的最后登录时间
+        current_user.last_seen = datetime.now(timezone.utc)
+        # 提交更改
+        db.session.commit()
+
+
+@app.route("/edit_profile", methods=["GET", "POST"])
+@login_required
+def edit_profile():
+    form = EditProfileForm()
+    if form.validate_on_submit():
+        current_user.username = form.username.data
+        current_user.about_me = form.about_me.data
+        db.session.commit()
+        flash("Your changes have been saved.")
+        return redirect(url_for("edit_profile"))
+    elif request.method == "GET":
+        form.username.data = current_user.username
+        form.about_me.data = current_user.about_me
+    return render_template("edit_profile.html", title="Edit Profile", form=form)
